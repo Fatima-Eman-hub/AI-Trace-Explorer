@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>New Request — AI Trace Explorer</title>
+<link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+<div id="app-shell"></div>
+
+<script src="assets/app.js"></script>
+<script>
+const content = renderShell("new", "Send a New Request", "TRY THE PIPELINE LIVE");
+
+content.innerHTML = `
+  <div class="grid-2col" style="grid-template-columns: 420px 1fr;">
+    <div class="card" style="padding:20px;">
+      <form id="request-form">
+        <div class="field">
+          <label>Model</label>
+          <select id="model-select"><option>Loading models…</option></select>
+        </div>
+        <div class="field">
+          <label>User Prompt</label>
+          <textarea id="user-prompt" placeholder="What is artificial intelligence?" required></textarea>
+        </div>
+        <div class="field">
+          <label>System Prompt <span style="font-weight:400;color:var(--ink-400);">(optional)</span></label>
+          <textarea id="system-prompt" style="min-height:60px;" placeholder="You are a helpful assistant…"></textarea>
+        </div>
+        <div class="field" style="display:flex;gap:12px;">
+          <div style="flex:1;">
+            <label>Temperature</label>
+            <input type="number" id="temperature" value="0.7" step="0.1" min="0" max="2" />
+          </div>
+          <div style="flex:1;">
+            <label>Max Tokens</label>
+            <input type="number" id="max-tokens" value="500" step="50" min="1" max="4096" />
+          </div>
+        </div>
+        <button type="submit" class="btn btn-trace" style="width:100%;justify-content:center;" id="submit-btn">
+          ▶ Run Through Pipeline
+        </button>
+        <p class="field help" style="text-align:center;">Free tip: choose a <b>Groq</b> model (gpt-oss-120b) to test with zero cost.</p>
+      </form>
+    </div>
+
+    <div class="card section" id="result-panel">
+      <div class="empty-state">
+        <svg class="icon" viewBox="0 0 24 24" fill="none"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+        <h4>Ready when you are</h4>
+        <p>Fill in a prompt and watch it move through all 7 pipeline stages — each one stays visible below so you can review it, however fast the pipeline actually runs.</p>
+      </div>
+    </div>
+  </div>
+`;
+
+async function loadModels() {
+  const select = document.getElementById("model-select");
+  try {
+    const models = await apiGet("/models");
+    if (!models.length) { select.innerHTML = `<option value="">No models available</option>`; return; }
+    select.innerHTML = models.map(m => `
+      <option value="${m.name}">${m.name} — ${m.provider}${m.input_price_per_1k === 0 ? " (free)" : ""}</option>
+    `).join("");
+  } catch {
+    select.innerHTML = `<option value="claude-sonnet">claude-sonnet</option><option value="gpt-oss-120b">gpt-oss-120b (free)</option>`;
+  }
+}
+loadModels();
+
+document.getElementById("request-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById("submit-btn");
+  const panel = document.getElementById("result-panel");
+
+  const payload = {
+    user_prompt: document.getElementById("user-prompt").value,
+    model_name: document.getElementById("model-select").value,
+    model_parameters: {
+      temperature: parseFloat(document.getElementById("temperature").value),
+      max_tokens: parseInt(document.getElementById("max-tokens").value),
+    },
+  };
+  const sysPrompt = document.getElementById("system-prompt").value.trim();
+  if (sysPrompt) payload.system_prompt = sysPrompt;
+
+  btn.disabled = true;
+  btn.textContent = "Running…";
+  panel.innerHTML = buildLoadingPipeline();
+
+  try {
+    const result = await apiPost("/llm/request", payload);
+    await animateStages(result.stages, payload);
+    renderResult(result);
+    showToast("Pipeline completed successfully");
+  } catch (err) {
+    panel.insertAdjacentHTML("beforeend", `<div class="empty-state"><h4>Request failed</h4><p>${escapeHtml(err.message)}</p></div>`);
+    showToast(err.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "▶ Run Through Pipeline";
+  }
+});
+
+function buildLoadingPipeline() {
+  const names = ["prompt_builder","tokenizer","llm_gateway","llm_call","response_parser","evaluator","cost_calculator"];
+  return `
+    <div class="section-head"><h2>⚡ Running Pipeline…</h2><span class="hint" id="pipeline-real-total"></span></div>
+    <div class="pipeline-flow" id="live-pipeline">
+      ${names.map((n, i) => `
+        ${i > 0 ? `<div class="stage-connector"></div>` : ""}
+        <div class="stage-node" id="live-stage-${i}">
+          <div class="stage-top"><span class="stage-num">${i+1}</span><span class="stage-status-dot pending"></span></div>
+          <div class="stage-name">${stageLabel(n)}</div>
+          <div class="stage-time mono">waiting…</div>
+          <div class="stage-bar"><div style="width:0%"></div></div>
+        </div>
+      `).join("")}
+    </div>
+    <div class="section-head"><h2>▤ What Happened — Live Log</h2><span class="hint">Stays visible after each stage finishes</span></div>
+    <div class="visual-feed" id="visual-feed"></div>
+  `;
+}
+
+const wait = (ms) => new Promise(r => setTimeout(r, ms));
+
+// Creates a new persistent card in the feed for this stage and returns
+// a handle to its body element + a function to mark it done with the
+// REAL duration the backend measured for that stage.
+function openStageCard(index, name) {
+  const feed = document.getElementById("visual-feed");
+  const card = document.createElement("div");
+  card.className = "stage-visual-card";
+  card.id = `visual-card-${index}`;
+  card.innerHTML = `
+    <div class="svc-head">
+      <span class="stage-num">${index + 1}</span>
+      <span class="svc-name">${stageLabel(name)}</span>
+      <span class="svc-time mono" id="svc-time-${index}">running…</span>
+    </div>
+    <div class="svc-body" id="svc-body-${index}"></div>
+  `;
+  feed.appendChild(card);
+  card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  return document.getElementById(`svc-body-${index}`);
+}
+function closeStageCard(index, durationMs, isError) {
+  const badge = document.getElementById(`svc-time-${index}`);
+  if (!badge) return;
+  badge.textContent = fmtMs(durationMs);
+  badge.classList.add(isError ? "err" : "done");
+}
+
+// ============================================================
+// Per-stage "inside the box" visualizations. Each writes into its own
+// persistent card body and returns a Promise once its animation has
+// played out — real data throughout, pacing is just for clarity.
+// ============================================================
+
+async function visualPromptBuilder(body, stage, payload) {
+  const out = stage.output || {};
+  const sources = [];
+  if (payload.system_prompt) sources.push({ label: "System Prompt", text: payload.system_prompt });
+  sources.push({ label: "User Prompt", text: payload.user_prompt });
+
+  body.innerHTML = `
+    <div class="visual-caption">Combining prompt pieces into one request</div>
+    <div class="merge-row">
+      ${sources.map((s, i) => `
+        <div class="merge-block" style="animation-delay:${i * 0.12}s">
+          <div class="mb-label">${escapeHtml(s.label)}</div>
+          <div class="mb-text">${escapeHtml(truncate(s.text, 90))}</div>
+        </div>
+      `).join("")}
+    </div>
+    <svg class="merge-arrow-down" width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M12 4v14m0 0-5-5m5 5 5-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <div class="assembled-box" id="assembled-box-${stage.stage_name}"></div>
+  `;
+  await wait(500);
+
+  const words = (out.formatted_prompt || "").split(/\s+/).filter(Boolean);
+  const perWordDelay = Math.min(45, Math.max(900 / Math.max(words.length, 1), 12));
+  const box = document.getElementById(`assembled-box-${stage.stage_name}`);
+  box.innerHTML = words.map((w, i) =>
+    `<span class="assemble-word" style="animation-delay:${i * perWordDelay}ms">${escapeHtml(w)}&nbsp;</span>`
+  ).join("");
+  await wait(words.length * perWordDelay + 350);
+}
+
+async function visualTokenizer(body, stage, promptStage) {
+  const text = (promptStage.output || {}).formatted_prompt || "";
+  const words = text.split(/\s+/).filter(Boolean);
+  const estimated = (stage.output || {}).estimated_input_tokens ?? words.length;
+
+  body.innerHTML = `
+    <div class="visual-caption">Splitting the prompt into tokens the model will read</div>
+    <div class="token-counter">Tokens counted: <span class="n mono" id="tok-count-${stage.stage_name}">0</span></div>
+    <div class="token-stream" id="token-stream-${stage.stage_name}"></div>
+    <div class="visual-caption">Illustrative word-level split — real subword tokenizers vary by model</div>
+  `;
+  const stream = document.getElementById(`token-stream-${stage.stage_name}`);
+  const counter = document.getElementById(`tok-count-${stage.stage_name}`);
+  const perTokenDelay = Math.min(45, Math.max(900 / Math.max(words.length, 1), 10));
+
+  for (let i = 0; i < words.length; i++) {
+    const chip = document.createElement("span");
+    chip.className = `token-chip tk-${i % 6}`;
+    chip.textContent = words[i];
+    stream.appendChild(chip);
+    counter.textContent = i + 1;
+    await wait(perTokenDelay);
+  }
+  counter.textContent = estimated;
+  await wait(250);
+}
+
+async function visualGateway(body, stage) {
+  const out = stage.output || {};
+  body.innerHTML = `
+    <div class="visual-caption">Routing to the correct provider</div>
+    <div class="route-diagram">
+      <div class="route-pill mono">${escapeHtml(out.model_name || "model")}</div>
+      <div class="route-line"></div>
+      <div class="route-pill provider mono">${escapeHtml(out.provider || "provider")}</div>
+    </div>
+  `;
+  await wait(650);
+}
+
+async function visualLLMCall(body, stage) {
+  const out = stage.output || {};
+  const isError = stage.status === "error";
+  body.innerHTML = `
+    <div class="visual-caption">Calling the model — this is the real network round-trip</div>
+    <div class="calling-row" id="calling-row-${stage.stage_name}">
+      <div class="spinner"></div>
+      <span>Waiting on <span class="mono">${escapeHtml(out.provider_model_id || "the API")}</span>…</span>
+    </div>
+  `;
+  const pacedWait = Math.min(Math.max((stage.duration_ms || 500) * 0.35, 400), 1200);
+  await wait(pacedWait);
+
+  const row = document.getElementById(`calling-row-${stage.stage_name}`);
+  if (isError) {
+    row.innerHTML = `<span style="color:var(--error);font-weight:700;">✕ Request failed</span>`;
+    if (stage.error) {
+      body.insertAdjacentHTML("beforeend", `<div class="code-block" style="margin-top:10px;color:#f5c9c0;">${escapeHtml(stage.error)}</div>`);
+    }
+  } else {
+    row.innerHTML = `<div class="check-pop">✓</div><span>Response received — ${out.actual_output_tokens ?? "?"} tokens generated</span>`;
+  }
+  await wait(350);
+}
+
+async function visualParser(body, stage) {
+  const out = stage.output || {};
+  body.innerHTML = `<div class="visual-caption">Cleaning and validating the raw response</div>
+    <div class="calling-row" id="parse-row-${stage.stage_name}"><div class="spinner"></div><span>Trimming whitespace, checking for truncation…</span></div>`;
+  await wait(450);
+  document.getElementById(`parse-row-${stage.stage_name}`).innerHTML =
+    `<div class="check-pop">✓</div><span>Clean — ${out.response_length_words ?? "?"} words, ${out.was_truncated ? "truncated" : "complete"}</span>`;
+  await wait(300);
+}
+
+async function visualEvaluator(body, stage) {
+  const out = stage.output || {};
+  const rows = [
+    { label: "Answer Relevancy", value: out.answer_relevancy ?? 0 },
+    { label: "Faithfulness", value: out.faithfulness_score ?? 0 },
+    { label: "Hallucination Risk", value: out.hallucination_score ?? 0 },
+  ];
+  body.innerHTML = `
+    <div class="visual-caption">Scoring response quality against the prompt</div>
+    ${rows.map((r, i) => `
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px;">
+        <span style="width:150px;font-size:12.5px;">${r.label}</span>
+        <div class="visual-score-track"><div class="visual-score-fill" id="vs-${stage.stage_name}-${i}"></div></div>
+        <span class="mono" id="vs-val-${stage.stage_name}-${i}" style="width:40px;text-align:right;font-size:12px;">0%</span>
+      </div>
+    `).join("")}
+  `;
+  await wait(150);
+  rows.forEach((r, i) => {
+    document.getElementById(`vs-${stage.stage_name}-${i}`).style.width = `${r.value * 100}%`;
+    document.getElementById(`vs-val-${stage.stage_name}-${i}`).textContent = fmtPct(r.value);
+  });
+  await wait(750);
+}
+
+async function visualCost(body, stage) {
+  const target = (stage.output || {}).total_cost_usd ?? 0;
+  body.innerHTML = `
+    <div class="visual-caption">Calculating cost from real token usage</div>
+    <div class="cost-countup" id="cost-val-${stage.stage_name}">$0.000000</div>
+  `;
+  const el = document.getElementById(`cost-val-${stage.stage_name}`);
+  const steps = 16;
+  for (let i = 1; i <= steps; i++) {
+    el.textContent = `$${((target / steps) * i).toFixed(6)}`;
+    await wait(20);
+  }
+  el.textContent = target === 0 ? "$0.00 (free tier)" : `$${target.toFixed(6)}`;
+  await wait(350);
+}
+
+// ============================================================
+// Runs every stage's visualization IN ORDER, but crucially: each one
+// gets its own permanent card appended to the feed, so earlier stages
+// never get erased. The pipeline itself may have finished in under a
+// second — this just paces the reveal so nothing flashes by unseen.
+// ============================================================
+async function animateStages(stages, payload) {
+  const startTime = performance.now();
+  for (let i = 0; i < stages.length; i++) {
+    const s = stages[i];
+    const node = document.getElementById(`live-stage-${i}`);
+    if (node) node.classList.add("active");
+
+    const body = openStageCard(i, s.stage_name);
+
+    try {
+      if (s.stage_name === "prompt_builder") await visualPromptBuilder(body, s, payload);
+      else if (s.stage_name === "tokenizer") await visualTokenizer(body, s, stages[0]);
+      else if (s.stage_name === "llm_gateway") await visualGateway(body, s);
+      else if (s.stage_name === "llm_call") await visualLLMCall(body, s);
+      else if (s.stage_name === "response_parser") await visualParser(body, s);
+      else if (s.stage_name === "evaluator") await visualEvaluator(body, s);
+      else if (s.stage_name === "cost_calculator") await visualCost(body, s);
+    } catch { /* visualization is best-effort; never block the real result */ }
+
+    closeStageCard(i, s.duration_ms, s.status === "error");
+
+    if (node) {
+      node.classList.remove("active");
+      node.classList.toggle("error", s.status === "error");
+      node.querySelector(".stage-status-dot").className = `stage-status-dot ${s.status === "error" ? "error" : ""}`;
+      node.querySelector(".stage-time").textContent = fmtMs(s.duration_ms);
+      node.querySelector(".stage-bar > div").style.width = "100%";
+    }
+
+    if (s.status === "error") break;
+  }
+  const realTotal = stages.reduce((sum, s) => sum + (s.duration_ms || 0), 0);
+  const hint = document.getElementById("pipeline-real-total");
+  if (hint) hint.textContent = `Real pipeline time: ${fmtMs(realTotal)}`;
+}
+
+function renderResult(result) {
+  const panel = document.getElementById("result-panel");
+  if (result.status === "error") {
+    panel.insertAdjacentHTML("beforeend", `
+      <div class="empty-state">
+        <h4>Failed at stage: ${escapeHtml(result.failed_stage || "unknown")}</h4>
+        <p>${escapeHtml(result.error || "")}</p>
+      </div>`);
+    return;
+  }
+
+  const evalData = result.evaluation;
+  panel.insertAdjacentHTML("beforeend", `
+    <div style="padding:20px;border-top:1px solid var(--line);">
+      <div class="io-label">Response</div>
+      <div class="code-block" style="margin-bottom:16px;">${escapeHtml(result.response)}</div>
+
+      <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:16px;">
+        <div><div class="io-label">Latency</div><div class="mono" style="font-weight:700;">${fmtMs(result.total_latency_ms)}</div></div>
+        <div><div class="io-label">Tokens</div><div class="mono" style="font-weight:700;">${result.metrics.input_tokens} in / ${result.metrics.output_tokens} out</div></div>
+        <div><div class="io-label">Cost</div><div class="mono" style="font-weight:700;">${fmtUsd(result.metrics.cost_usd)}</div></div>
+        ${evalData ? `<div><div class="io-label">Quality</div><span class="badge ${evalData.needs_review ? 'warning' : 'success'}"><span class="dot"></span>${evalData.quality_level}</span></div>` : ""}
+      </div>
+
+      <a href="trace.html?id=${result.trace_id}" class="btn btn-ghost">View Full Trace →</a>
+    </div>
+  `);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,44 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment files (do NOT commit real credentials)
+.env
+.env.*
+
+# Pytest
+.pytest_cache/
+
+# MyPy
+.mypy_cache/
+
+# Coverage
+.coverage
+coverage.xml
+
+# SQLite
+*.sqlite3
+
+# IDEs and editors
+.vscode/
+.idea/
+
+# macOS/Windows
+.DS_Store
+Thumbs.db

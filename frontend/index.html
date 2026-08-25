@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Dashboard — AI Trace Explorer</title>
+<link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+<div id="app-shell"></div>
+
+<script src="assets/app.js"></script>
+<script>
+const content = renderShell("dashboard", "Dashboard", "LLMOPS OBSERVABILITY");
+
+content.innerHTML = `
+  <div class="kpi-row" id="kpi-row">
+    ${Array(5).fill(`<div class="card kpi-card"><div class="skel skel-text" style="width:60%"></div><div class="skel skel-kpi"></div></div>`).join("")}
+  </div>
+
+  <div class="card section">
+    <div class="section-head">
+      <h2>⚡ 7-Stage Request Pipeline — Most Recent Trace</h2>
+      <span class="hint" id="pipeline-hint">Loading…</span>
+    </div>
+    <div class="pipeline-flow" id="pipeline-flow"></div>
+  </div>
+
+  <div class="grid-2col">
+    <div class="card section">
+      <div class="section-head">
+        <h2>☰ Recent Request Traces</h2>
+        <a href="traces.html" class="hint">View all →</a>
+      </div>
+      <div id="recent-table"></div>
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:16px;">
+      <div class="card side-card">
+        <h3>◐ Model Distribution</h3>
+        <div id="model-donut"><div class="skel" style="width:120px;height:120px;border-radius:50%;margin:0 auto;"></div></div>
+      </div>
+      <div class="card side-card">
+        <h3>◈ Quality Score Trend</h3>
+        <div id="quality-trend"><div class="skel" style="height:60px;"></div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card section">
+    <div class="section-head">
+      <h2>▲ 7-Day Cost Accumulation</h2>
+      <span class="hint" id="cost-total-hint">—</span>
+    </div>
+    <div style="padding:20px;" id="cost-chart"></div>
+  </div>
+`;
+
+async function loadDashboard() {
+  try {
+    const [perf, cost, latency, traces, models] = await Promise.all([
+      apiGet("/analytics/performance?period=7d"),
+      apiGet("/analytics/cost?period=7d"),
+      apiGet("/analytics/latency?period=7d"),
+      apiGet("/traces?page=1&limit=6"),
+      apiGet("/models"),
+    ]);
+
+    renderKpis(perf, cost, latency);
+    renderRecentTable(traces.traces);
+    renderModelDonut(cost.by_model, models);
+    renderQualityTrend(traces.traces);
+    renderCostBars(cost.by_hour);
+
+    if (traces.traces.length > 0) {
+      await loadPipelineForTrace(traces.traces[0].id);
+    } else {
+      document.getElementById("pipeline-flow").innerHTML = emptyState(
+        "No traces yet", "Send your first request to see the pipeline in action.",
+        `<a href="new-request.html" class="btn btn-trace">+ New Request</a>`
+      );
+      document.getElementById("pipeline-hint").textContent = "";
+    }
+  } catch (err) {
+    showToast(err.message, true);
+    document.getElementById("kpi-row").innerHTML = errorState(err.message);
+  }
+}
+
+function emptyState(title, desc, action) {
+  return `<div class="empty-state">
+    <svg class="icon" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.5"/><path d="M9 12h6M12 9v6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+    <h4>${title}</h4><p>${desc}</p>${action || ""}
+  </div>`;
+}
+function errorState(msg) {
+  return `<div class="empty-state"><h4>Couldn't reach the backend</h4><p>${escapeHtml(msg)}<br>Is <code>uvicorn main:app --reload</code> running?</p></div>`;
+}
+
+function renderKpis(perf, cost, latency) {
+  const kpis = [
+    { label: "Total Traces", value: perf.total_requests, delta: null },
+    { label: "Avg Latency", value: fmtMs(latency.summary.avg_latency_ms), delta: null },
+    { label: "Success Rate", value: `${perf.success_rate}%`, delta: null },
+    { label: "Total Cost", value: fmtUsd(cost.total_cost_usd), delta: null },
+    { label: "Active Models", value: Object.keys(cost.by_model).length, delta: null },
+  ];
+  document.getElementById("kpi-row").innerHTML = kpis.map(k => `
+    <div class="card kpi-card">
+      <div class="kpi-label">${k.label}</div>
+      <div class="kpi-value mono">${k.value}</div>
+    </div>
+  `).join("");
+}
+
+function renderRecentTable(traces) {
+  const el = document.getElementById("recent-table");
+  if (!traces.length) { el.innerHTML = emptyState("No requests yet", "Your traces will show up here once you send one.", `<a href="new-request.html" class="btn btn-trace">+ New Request</a>`); return; }
+  el.innerHTML = `
+    <table>
+      <thead><tr><th>Trace ID</th><th>Model</th><th>Latency</th><th>Cost</th><th>Status</th></tr></thead>
+      <tbody>
+        ${traces.map(t => `
+          <tr onclick="window.location.href='trace.html?id=${t.id}'">
+            <td class="trace-id mono">${t.id.slice(0, 8)}</td>
+            <td>${escapeHtml(t.model_name)}</td>
+            <td class="mono">${fmtMs(t.total_latency_ms)}</td>
+            <td class="mono">${fmtUsd(t.cost_usd)}</td>
+            <td>${statusBadge(t.status)}</td>
+          </tr>
+        `).join("")}
+      </tbody>
+    </table>
+  `;
+}
+
+function statusBadge(status) {
+  const map = { success: "success", error: "error", pending: "warning" };
+  return `<span class="badge ${map[status] || "warning"}"><span class="dot"></span>${status}</span>`;
+}
+
+function renderModelDonut(byModel, allModels) {
+  const palette = ["var(--trace)", "var(--ink-600)", "var(--warning)", "var(--success)", "var(--ink-400)"];
+  const entries = Object.entries(byModel).sort((a, b) => b[1].requests - a[1].requests);
+  const data = entries.length
+    ? entries.map(([name, d], i) => ({ label: name, value: d.requests, color: palette[i % palette.length] }))
+    : [{ label: "No data", value: 1, color: "var(--line)" }];
+  renderDonut(document.getElementById("model-donut"), data);
+}
+
+function renderQualityTrend(traces) {
+  // We don't have quality per list-row; fetch a couple of details lazily-free approach:
+  // use latency as a lightweight proxy trend if evaluation not available inline.
+  const values = traces.slice(0, 8).reverse().map(t => t.total_latency_ms || 0);
+  renderSparkline(document.getElementById("quality-trend"), values);
+}
+
+function renderCostBars(byHour) {
+  document.getElementById("cost-total-hint").textContent = `${byHour.length} data points`;
+  const el = document.getElementById("cost-chart");
+  if (!byHour.length) { el.innerHTML = emptyState("No cost data yet", "Cost trends appear once requests start coming in."); return; }
+  const data = byHour.slice(-7).map(b => ({ label: b.bucket.slice(5, 10), value: b.cost_usd }));
+  renderBarChart(el, data, fmtUsd);
+}
+
+async function loadPipelineForTrace(traceId) {
+  const detail = await apiGet(`/traces/${traceId}`);
+  const el = document.getElementById("pipeline-flow");
+  document.getElementById("pipeline-hint").innerHTML = `<a href="trace.html?id=${traceId}" class="mono">${traceId.slice(0,8)} →</a>`;
+
+  const maxDuration = Math.max(...detail.stages.map(s => s.duration_ms || 0), 1);
+  el.innerHTML = detail.stages.map((s, i) => `
+    ${i > 0 ? `<div class="stage-connector"><div class="pulse"></div></div>` : ""}
+    <div class="stage-node ${s.status === "error" ? "error" : ""}">
+      <div class="stage-top">
+        <span class="stage-num">${i + 1}</span>
+        <span class="stage-status-dot ${s.status === "error" ? "error" : ""}"></span>
+      </div>
+      <div class="stage-name">${stageLabel(s.stage_name)}</div>
+      <div class="stage-time mono">${fmtMs(s.duration_ms)}</div>
+      <div class="stage-bar"><div style="width:${((s.duration_ms||0)/maxDuration)*100}%"></div></div>
+    </div>
+  `).join("");
+}
+
+loadDashboard();
+</script>
+</body>
+</html>

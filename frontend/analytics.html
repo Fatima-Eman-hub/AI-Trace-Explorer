@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Analytics — AI Trace Explorer</title>
+<link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+<div id="app-shell"></div>
+
+<script src="assets/app.js"></script>
+<script>
+const content = renderShell("analytics", "Analytics", "TRENDS & AGGREGATES");
+
+let period = "24h";
+
+content.innerHTML = `
+  <div class="page-toolbar">
+    <div style="display:flex;gap:8px;" id="period-filters">
+      ${["1h","24h","7d","30d"].map(p => `<button class="filter-chip ${p==="24h"?"active":""}" data-period="${p}">${p}</button>`).join("")}
+    </div>
+  </div>
+
+  <div class="kpi-row" id="perf-kpis" style="grid-template-columns:repeat(4,1fr);"></div>
+
+  <div class="grid-2col" style="grid-template-columns:1fr 1fr;">
+    <div class="card section">
+      <div class="section-head"><h2>◷ Latency Over Time</h2><span class="hint" id="slowest-hint"></span></div>
+      <div style="padding:20px;" id="latency-chart"></div>
+    </div>
+    <div class="card section">
+      <div class="section-head"><h2>▲ Cost by Model</h2></div>
+      <div style="padding:20px;" id="cost-model-chart"></div>
+    </div>
+  </div>
+
+  <div class="card section">
+    <div class="section-head"><h2>◈ Quality Distribution</h2></div>
+    <div style="padding:20px;" id="quality-dist"></div>
+  </div>
+
+  <div class="card section">
+    <div class="section-head"><h2>✕ Errors by Stage</h2></div>
+    <div id="error-breakdown"></div>
+  </div>
+`;
+
+document.getElementById("period-filters").addEventListener("click", (e) => {
+  const btn = e.target.closest(".filter-chip");
+  if (!btn) return;
+  document.querySelectorAll("#period-filters .filter-chip").forEach(c => c.classList.remove("active"));
+  btn.classList.add("active");
+  period = btn.dataset.period;
+  load();
+});
+
+function emptyState(title, desc) {
+  return `<div class="empty-state"><h4>${title}</h4><p>${desc}</p></div>`;
+}
+
+async function load() {
+  document.getElementById("perf-kpis").innerHTML = Array(4).fill(`<div class="card kpi-card"><div class="skel skel-text" style="width:60%"></div><div class="skel skel-kpi"></div></div>`).join("");
+
+  try {
+    const [perf, cost, latency] = await Promise.all([
+      apiGet(`/analytics/performance?period=${period}`),
+      apiGet(`/analytics/cost?period=${period}`),
+      apiGet(`/analytics/latency?period=${period}`),
+    ]);
+
+    document.getElementById("perf-kpis").innerHTML = `
+      <div class="card kpi-card"><div class="kpi-label">Total Requests</div><div class="kpi-value mono">${perf.total_requests}</div></div>
+      <div class="card kpi-card"><div class="kpi-label">Success Rate</div><div class="kpi-value mono">${perf.success_rate}%</div></div>
+      <div class="card kpi-card"><div class="kpi-label">Requests / Hour</div><div class="kpi-value mono">${perf.throughput.requests_per_hour}</div></div>
+      <div class="card kpi-card"><div class="kpi-label">Needs Review</div><div class="kpi-value mono">${perf.quality.needs_review_count}</div></div>
+    `;
+
+    document.getElementById("slowest-hint").textContent = latency.summary.slowest_stage
+      ? `Slowest: ${stageLabel(latency.summary.slowest_stage)} (${fmtMs(latency.summary.slowest_stage_avg_ms)})` : "";
+
+    const latEl = document.getElementById("latency-chart");
+    if (!latency.data.length) latEl.innerHTML = emptyState("No latency data", "Send some requests to populate this chart.");
+    else renderBarChart(latEl, latency.data.slice(-10).map(d => ({ label: d.bucket.slice(11,16), value: d.avg_latency_ms })), fmtMs);
+
+    const costEl = document.getElementById("cost-model-chart");
+    const modelEntries = Object.entries(cost.by_model);
+    if (!modelEntries.length) costEl.innerHTML = emptyState("No cost data", "Cost breakdown appears once requests are made.");
+    else renderBarChart(costEl, modelEntries.map(([name, d]) => ({ label: name.slice(0,10), value: d.cost_usd })), fmtUsd);
+
+    const q = perf.quality;
+    const qualEl = document.getElementById("quality-dist");
+    const total = q.excellent_count + q.good_count + q.fair_count + q.poor_count;
+    if (!total) qualEl.innerHTML = emptyState("No evaluations yet", "Quality scores appear after requests complete.");
+    else {
+      const bars = [
+        { label: "Excellent", count: q.excellent_count, color: "var(--trace)" },
+        { label: "Good", count: q.good_count, color: "var(--success)" },
+        { label: "Fair", count: q.fair_count, color: "var(--warning)" },
+        { label: "Poor", count: q.poor_count, color: "var(--error)" },
+      ];
+      qualEl.innerHTML = bars.map(b => `
+        <div class="score-row">
+          <span class="label">${b.label}</span>
+          <div class="track"><div class="fill" style="width:${(b.count/total)*100}%;background:${b.color};"></div></div>
+          <span class="val mono">${b.count}</span>
+        </div>
+      `).join("");
+    }
+
+    const errEl = document.getElementById("error-breakdown");
+    const stages = Object.entries(perf.errors.by_stage);
+    if (!stages.length) errEl.innerHTML = emptyState("No errors 🎉", "Every request in this period completed successfully.");
+    else errEl.innerHTML = `<table><thead><tr><th>Stage</th><th>Failures</th></tr></thead><tbody>
+      ${stages.map(([s,c]) => `<tr><td>${stageLabel(s)}</td><td class="mono">${c}</td></tr>`).join("")}
+    </tbody></table>`;
+
+  } catch (err) {
+    showToast(err.message, true);
+    document.getElementById("perf-kpis").innerHTML = emptyState("Couldn't load analytics", err.message);
+  }
+}
+
+load();
+</script>
+</body>
+</html>

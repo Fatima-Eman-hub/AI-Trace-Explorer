@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Trace Detail — AI Trace Explorer</title>
+<link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+<div id="app-shell"></div>
+
+<script src="assets/app.js"></script>
+<script>
+const params = new URLSearchParams(window.location.search);
+const traceId = params.get("id");
+
+const content = renderShell("traces", "Trace Detail", traceId ? traceId : "NO TRACE SELECTED");
+
+if (!traceId) {
+  content.innerHTML = `<div class="card"><div class="empty-state">
+    <h4>No trace selected</h4><p>Go back to the traces list and pick one to inspect.</p>
+    <a href="traces.html" class="btn btn-trace">← Back to Traces</a>
+  </div></div>`;
+} else {
+  content.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+      <a href="traces.html" class="hint">← Back to all traces</a>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-ghost" id="export-json-btn">⬇ Export JSON</button>
+        <button class="btn btn-ghost" id="export-csv-btn">⬇ Export Stages CSV</button>
+      </div>
+    </div>
+    <div class="card" style="padding:20px;margin-bottom:16px;" id="summary-card">
+      <div class="skel skel-text" style="width:40%"></div>
+    </div>
+    <div class="card section" style="margin-bottom:16px;">
+      <div class="section-head"><h2>⚡ Pipeline Flow</h2><span class="hint" id="total-latency-hint"></span></div>
+      <div class="pipeline-flow" id="pipeline-flow"></div>
+    </div>
+    <div class="grid-2col">
+      <div class="card section">
+        <div class="section-head"><h2>▤ Stage-by-Stage Detail</h2></div>
+        <div id="stage-details"></div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:16px;">
+        <div class="card side-card">
+          <h3>◈ Evaluation Scores</h3>
+          <div id="eval-scores"></div>
+        </div>
+        <div class="card side-card">
+          <h3>✎ Full Response</h3>
+          <div id="full-response" class="code-block" style="max-height:220px;overflow-y:auto;"></div>
+        </div>
+      </div>
+    </div>
+  `;
+  loadTrace();
+
+  document.getElementById("export-json-btn").addEventListener("click", () => downloadExport("json"));
+  document.getElementById("export-csv-btn").addEventListener("click", () => downloadExport("csv"));
+}
+
+function downloadExport(format) {
+  const url = `http://localhost:8000/api/v1/traces/${traceId}/export?format=${format}`;
+  fetch(url, { headers: apiHeaders() })
+    .then(res => {
+      if (!res.ok) throw new Error(`Export failed (${res.status})`);
+      const cd = res.headers.get("Content-Disposition") || "";
+      const match = cd.match(/filename=(.+)/);
+      return res.blob().then(blob => ({ blob, filename: match ? match[1] : `trace.${format}` }));
+    })
+    .then(({ blob, filename }) => {
+      const url2 = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url2; a.download = filename;
+      document.body.appendChild(a); a.click(); a.remove();
+      window.URL.revokeObjectURL(url2);
+      showToast("Export downloaded");
+    })
+    .catch(err => showToast(err.message, true));
+}
+
+function statusBadge(status) {
+  const map = { success: "success", error: "error", pending: "warning" };
+  return `<span class="badge ${map[status] || "warning"}"><span class="dot"></span>${status}</span>`;
+}
+
+async function loadTrace() {
+  try {
+    const t = await apiGet(`/traces/${traceId}`);
+    renderSummary(t);
+    renderPipeline(t);
+    renderStageDetails(t);
+    renderEvaluation(t.evaluation);
+    document.getElementById("full-response").textContent = t.full_response || (t.error_message || "No response.");
+  } catch (err) {
+    document.getElementById("summary-card").innerHTML = `<div class="empty-state"><h4>Trace not found</h4><p>${escapeHtml(err.message)}</p></div>`;
+    showToast(err.message, true);
+  }
+}
+
+function renderSummary(t) {
+  document.getElementById("summary-card").innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:20px;flex-wrap:wrap;">
+      <div style="flex:1;min-width:260px;">
+        <div class="io-label">User Prompt</div>
+        <div style="font-size:14px;font-weight:600;line-height:1.5;">${escapeHtml(t.user_prompt)}</div>
+      </div>
+      <div style="display:flex;gap:22px;flex-wrap:wrap;">
+        <div><div class="io-label">Model</div><div class="mono" style="font-weight:600;">${escapeHtml(t.model_name)}</div></div>
+        <div><div class="io-label">Status</div>${statusBadge(t.status)}</div>
+        <div><div class="io-label">Tokens</div><div class="mono">${(t.input_tokens||0)} in / ${(t.output_tokens||0)} out</div></div>
+        <div><div class="io-label">Cost</div><div class="mono">${fmtUsd(t.cost_usd)}</div></div>
+      </div>
+    </div>
+  `;
+}
+
+function renderPipeline(t) {
+  document.getElementById("total-latency-hint").textContent = `Total: ${fmtMs(t.total_latency_ms)}`;
+  const maxDuration = Math.max(...t.stages.map(s => s.duration_ms || 0), 1);
+  document.getElementById("pipeline-flow").innerHTML = t.stages.map((s, i) => `
+    ${i > 0 ? `<div class="stage-connector">${s.status !== "error" ? `<div class="pulse"></div>` : ""}</div>` : ""}
+    <div class="stage-node ${s.status === "error" ? "error" : ""}" onclick="toggleStage(${i})">
+      <div class="stage-top">
+        <span class="stage-num">${i + 1}</span>
+        <span class="stage-status-dot ${s.status === "error" ? "error" : ""}"></span>
+      </div>
+      <div class="stage-name">${stageLabel(s.stage_name)}</div>
+      <div class="stage-time mono">${fmtMs(s.duration_ms)}</div>
+      <div class="stage-bar"><div style="width:${((s.duration_ms||0)/maxDuration)*100}%"></div></div>
+    </div>
+  `).join("");
+}
+
+function renderStageDetails(t) {
+  const el = document.getElementById("stage-details");
+  el.innerHTML = t.stages.map((s, i) => `
+    <div class="stage-detail-card">
+      <div class="stage-detail-head" id="head-${i}" onclick="toggleStage(${i})">
+        <span class="stage-num" style="background:${s.status === 'error' ? 'var(--error)' : 'var(--ink-900)'}">${i + 1}</span>
+        <div>
+          <div style="font-weight:700;font-size:13px;">${stageLabel(s.stage_name)}</div>
+          <div class="mono" style="font-size:11px;color:var(--ink-400);">${fmtMs(s.duration_ms)} · ${s.status}</div>
+        </div>
+        <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="m9 6 6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </div>
+      <div class="stage-detail-body" id="body-${i}">
+        ${s.error_message ? `<div class="io-label" style="color:var(--error);">Error</div><div class="code-block" style="color:#f5c9c0;">${escapeHtml(s.error_message)}</div>` : ""}
+        <div class="io-grid">
+          <div><div class="io-label">Input</div><div class="code-block">${escapeHtml(JSON.stringify(s.stage_input, null, 2))}</div></div>
+          <div><div class="io-label">Output</div><div class="code-block">${escapeHtml(JSON.stringify(s.stage_output, null, 2))}</div></div>
+        </div>
+      </div>
+    </div>
+  `).join("");
+}
+
+function toggleStage(i) {
+  document.getElementById(`head-${i}`).classList.toggle("open");
+  document.getElementById(`body-${i}`).classList.toggle("open");
+}
+
+function renderEvaluation(evalData) {
+  const el = document.getElementById("eval-scores");
+  if (!evalData) { el.innerHTML = `<p style="color:var(--ink-400);font-size:12.5px;">No evaluation available (request may have failed before scoring).</p>`; return; }
+  const rows = [
+    { label: "Answer Relevancy", value: evalData.answer_relevancy },
+    { label: "Faithfulness", value: evalData.faithfulness_score },
+    { label: "Hallucination Risk", value: evalData.hallucination_score, invert: true },
+  ];
+  el.innerHTML = `
+    <div style="margin-bottom:12px;">
+      <span class="badge ${evalData.needs_review ? 'warning' : 'success'}">
+        <span class="dot"></span>${evalData.quality_level} ${evalData.needs_review ? "· needs review" : ""}
+      </span>
+    </div>
+    ${rows.map(r => `
+      <div class="score-row">
+        <span class="label">${r.label}</span>
+        <div class="track"><div class="fill" style="width:${r.value*100}%; background:${r.invert && r.value > 0.4 ? 'var(--error)' : 'var(--trace)'};"></div></div>
+        <span class="val mono">${fmtPct(r.value)}</span>
+      </div>
+    `).join("")}
+  `;
+}
+</script>
+</body>
+</html>

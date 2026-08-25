@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Models — AI Trace Explorer</title>
+<link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+<div id="app-shell"></div>
+
+<script src="assets/app.js"></script>
+<script>
+const content = renderShell("models", "Supported Models", "REGISTRY");
+
+content.innerHTML = `<div class="model-grid" id="model-grid">
+  ${Array(4).fill(`<div class="card model-card"><div class="skel skel-text" style="width:40%"></div><div class="skel skel-text" style="width:70%;height:18px;"></div><div class="skel skel-text"></div></div>`).join("")}
+</div>`;
+
+async function loadModels() {
+  const el = document.getElementById("model-grid");
+  try {
+    const models = await apiGet("/models");
+    if (!models.length) {
+      el.innerHTML = `<div class="empty-state" style="grid-column:1/-1;"><h4>No models registered</h4><p>Models are seeded automatically when the backend starts.</p></div>`;
+      return;
+    }
+    el.innerHTML = models.map(m => `
+      <div class="card model-card">
+        <div class="provider">${escapeHtml(m.provider)}</div>
+        <h3>${escapeHtml(m.name)}</h3>
+        <p>${escapeHtml(m.description || "No description available.")}</p>
+        <div class="stats">
+          <div><div class="stat-label">CONTEXT</div><div class="stat-val mono">${m.max_context_tokens ? (m.max_context_tokens/1000)+"K" : "—"}</div></div>
+          <div><div class="stat-label">INPUT / 1K</div><div class="stat-val mono">${m.input_price_per_1k === 0 ? "Free" : fmtUsd(m.input_price_per_1k)}</div></div>
+          <div><div class="stat-label">OUTPUT / 1K</div><div class="stat-val mono">${m.output_price_per_1k === 0 ? "Free" : fmtUsd(m.output_price_per_1k)}</div></div>
+        </div>
+      </div>
+    `).join("");
+  } catch (err) {
+    el.innerHTML = `<div class="empty-state" style="grid-column:1/-1;"><h4>Couldn't load models</h4><p>${escapeHtml(err.message)}</p></div>`;
+    showToast(err.message, true);
+  }
+}
+loadModels();
+</script>
+</body>
+</html>

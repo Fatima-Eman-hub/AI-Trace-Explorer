@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Traces — AI Trace Explorer</title>
+<link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+<div id="app-shell"></div>
+
+<script src="assets/app.js"></script>
+<script>
+const content = renderShell("traces", "Request Traces", "HISTORY & INSPECTION");
+
+const urlParams = new URLSearchParams(window.location.search);
+let state = { page: 1, limit: 15, status: null, model: null, search: urlParams.get("search") || "" };
+
+content.innerHTML = `
+  <div class="page-toolbar">
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+      <div class="search-box" style="width:260px;">
+        <svg viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="m20 20-3-3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <input type="text" id="page-search" placeholder="Search prompt or model…" value="${escapeHtml(state.search)}" />
+      </div>
+      <div style="display:flex;gap:8px;" id="status-filters">
+        <button class="filter-chip ${!state.status ? 'active' : ''}" data-status="">All</button>
+        <button class="filter-chip" data-status="success">Success</button>
+        <button class="filter-chip" data-status="error">Error</button>
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;">
+      <button class="btn btn-ghost" id="export-btn">⬇ Export CSV</button>
+      <a href="new-request.html" class="btn btn-trace">+ New Request</a>
+    </div>
+  </div>
+  <div class="card">
+    <div id="traces-table"></div>
+    <div class="pagination" id="pagination"></div>
+  </div>
+`;
+
+document.getElementById("status-filters").addEventListener("click", (e) => {
+  const btn = e.target.closest(".filter-chip");
+  if (!btn) return;
+  document.querySelectorAll(".filter-chip").forEach(c => c.classList.remove("active"));
+  btn.classList.add("active");
+  state.status = btn.dataset.status || null;
+  state.page = 1;
+  load();
+});
+
+let searchDebounce;
+document.getElementById("page-search").addEventListener("input", (e) => {
+  clearTimeout(searchDebounce);
+  searchDebounce = setTimeout(() => {
+    state.search = e.target.value.trim();
+    state.page = 1;
+    load();
+  }, 350);
+});
+
+document.getElementById("export-btn").addEventListener("click", () => {
+  let path = `http://localhost:8000/api/v1/traces/export?format=csv`;
+  if (state.status) path += `&status=${state.status}`;
+  if (state.model) path += `&model=${state.model}`;
+  if (state.search) path += `&search=${encodeURIComponent(state.search)}`;
+  fetch(path, { headers: apiHeaders() })
+    .then(res => {
+      if (!res.ok) throw new Error(`Export failed (${res.status})`);
+      return res.blob();
+    })
+    .then(blob => {
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = "traces_export.csv";
+      document.body.appendChild(a); a.click(); a.remove();
+      window.URL.revokeObjectURL(url);
+      showToast("Export downloaded");
+    })
+    .catch(err => showToast(err.message, true));
+});
+
+function statusBadge(status) {
+  const map = { success: "success", error: "error", pending: "warning" };
+  return `<span class="badge ${map[status] || "warning"}"><span class="dot"></span>${status}</span>`;
+}
+
+async function load() {
+  const tableEl = document.getElementById("traces-table");
+  tableEl.innerHTML = Array(6).fill(`<div style="padding:14px 20px;"><div class="skel skel-text"></div></div>`).join("");
+
+  try {
+    let path = `/traces?page=${state.page}&limit=${state.limit}`;
+    if (state.status) path += `&status=${state.status}`;
+    if (state.model) path += `&model=${state.model}`;
+    if (state.search) path += `&search=${encodeURIComponent(state.search)}`;
+
+    const data = await apiGet(path);
+
+    if (!data.traces.length) {
+      tableEl.innerHTML = `<div class="empty-state">
+        <h4>No traces found</h4>
+        <p>${state.search ? `No results for "${escapeHtml(state.search)}". Try a different search.` : "Try a different filter, or send a new request."}</p>
+        <a href="new-request.html" class="btn btn-trace">+ New Request</a>
+      </div>`;
+      document.getElementById("pagination").innerHTML = "";
+      return;
+    }
+
+    tableEl.innerHTML = `
+      <table>
+        <thead><tr>
+          <th>Trace ID</th><th>Prompt</th><th>Model</th><th>Tokens</th>
+          <th>Latency</th><th>Cost</th><th>When</th><th>Status</th>
+        </tr></thead>
+        <tbody>
+          ${data.traces.map(t => `
+            <tr onclick="window.location.href='trace.html?id=${t.id}'">
+              <td class="trace-id mono">${t.id.slice(0, 8)}</td>
+              <td>${escapeHtml(truncate(t.user_prompt, 42))}</td>
+              <td>${escapeHtml(t.model_name)}</td>
+              <td class="mono">${(t.input_tokens||0) + (t.output_tokens||0) || "—"}</td>
+              <td class="mono">${fmtMs(t.total_latency_ms)}</td>
+              <td class="mono">${fmtUsd(t.cost_usd)}</td>
+              <td class="mono" style="color:var(--ink-400);font-size:11.5px;">${fmtRelTime(t.timestamp)}</td>
+              <td>${statusBadge(t.status)}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    `;
+
+    renderPagination(data.pagination);
+  } catch (err) {
+    tableEl.innerHTML = `<div class="empty-state"><h4>Couldn't load traces</h4><p>${escapeHtml(err.message)}</p></div>`;
+    showToast(err.message, true);
+  }
+}
+
+function renderPagination(p) {
+  const el = document.getElementById("pagination");
+  if (p.pages <= 1) { el.innerHTML = ""; return; }
+  let btns = "";
+  btns += `<button class="page-btn" ${p.page === 1 ? "disabled" : ""} onclick="goPage(${p.page - 1})">‹</button>`;
+  for (let i = 1; i <= p.pages; i++) {
+    if (p.pages > 7 && Math.abs(i - p.page) > 2 && i !== 1 && i !== p.pages) {
+      if (i === 2 || i === p.pages - 1) btns += `<span style="color:var(--ink-400);">…</span>`;
+      continue;
+    }
+    btns += `<button class="page-btn ${i === p.page ? "active" : ""}" onclick="goPage(${i})">${i}</button>`;
+  }
+  btns += `<button class="page-btn" ${p.page === p.pages ? "disabled" : ""} onclick="goPage(${p.page + 1})">›</button>`;
+  el.innerHTML = btns;
+}
+
+function goPage(n) { state.page = n; load(); }
+
+load();
+</script>
+</body>
+</html>
