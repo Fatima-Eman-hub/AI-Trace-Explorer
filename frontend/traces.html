@@ -124,7 +124,7 @@ async function load() {
               <td class="mono">${fmtMs(t.total_latency_ms)}</td>
               <td class="mono">${fmtUsd(t.cost_usd)}</td>
               <td class="mono" style="color:var(--ink-400);font-size:11.5px;">${fmtRelTime(t.timestamp)}</td>
-              <td>${statusBadge(t.status)}</td>
+              <td>${statusBadge(t.status)}${t.failure_category ? ` <span class="mono" style="font-size:10px;color:var(--ink-400);">${escapeHtml(t.failure_category.replace(/_/g,' '))}</span>` : ""}</td>
             </tr>
           `).join("")}
         </tbody>

@@ -1,8 +1,13 @@
+"""
+Pipeline Orchestrator - runs all 7 stages IN ORDER for one request.
+"""
+
 from typing import Any, Callable, Dict, List, Optional
 from sqlalchemy.orm import Session
 import logging
 
 from app.models import Request, Evaluation
+from app.failure_classifier import classify_failure
 from app.stages import (
     PromptBuilderStage,
     TokenizerStage,
@@ -39,12 +44,6 @@ class PipelineOrchestrator:
         tags: Optional[List[str]] = None,
         on_stage: OnStageCallback = None,
     ) -> Dict[str, Any]:
-        """Run the complete pipeline for one request.
-
-        Args:
-            on_stage: optional callback invoked with each stage's summary
-                dict the moment that stage finishes (success or error).
-        """
 
         request = Request(
             user_prompt=user_prompt,
@@ -73,14 +72,10 @@ class PipelineOrchestrator:
                     logger.exception("on_stage callback raised - ignoring, pipeline continues")
             return summary
 
-        # ===== STAGE 1: Prompt Builder =====
         result = self.prompt_builder.execute(
             db, request_id, stage_order,
-            input_data={
-                "user_prompt": user_prompt,
-                "system_prompt": system_prompt,
-                "few_shot_examples": few_shot_examples or [],
-            },
+            input_data={"user_prompt": user_prompt, "system_prompt": system_prompt,
+                        "few_shot_examples": few_shot_examples or []},
         )
         record("prompt_builder", result)
         if not result.success:
@@ -88,7 +83,6 @@ class PipelineOrchestrator:
         stage_order += 1
         formatted_prompt = result.output["formatted_prompt"]
 
-        # ===== STAGE 2: Tokenizer =====
         result = self.tokenizer.execute(
             db, request_id, stage_order,
             input_data={"formatted_prompt": formatted_prompt, "system_prompt": system_prompt or ""},
@@ -98,7 +92,6 @@ class PipelineOrchestrator:
             return self._fail(db, request, "tokenizer", result.error, stages_summary)
         stage_order += 1
 
-        # ===== STAGE 3: LLM Gateway =====
         result = self.llm_gateway.execute(
             db, request_id, stage_order,
             input_data={"model_name": model_name, "model_parameters": model_parameters or {}},
@@ -110,14 +103,11 @@ class PipelineOrchestrator:
         provider = result.output["provider"]
         resolved_parameters = result.output["resolved_parameters"]
 
-        # ===== STAGE 4: LLM Call =====
         result = self.llm_call.execute(
             db, request_id, stage_order,
-            input_data={
-                "provider": provider, "model_name": model_name,
-                "formatted_prompt": formatted_prompt, "system_prompt": system_prompt,
-                "resolved_parameters": resolved_parameters,
-            },
+            input_data={"provider": provider, "model_name": model_name,
+                        "formatted_prompt": formatted_prompt, "system_prompt": system_prompt,
+                        "resolved_parameters": resolved_parameters},
         )
         record("llm_call", result)
         if not result.success:
@@ -128,7 +118,6 @@ class PipelineOrchestrator:
         response_text = result.output["response_text"]
         stop_reason = result.output["stop_reason"]
 
-        # ===== STAGE 5: Response Parser =====
         result = self.response_parser.execute(
             db, request_id, stage_order,
             input_data={"response_text": response_text, "stop_reason": stop_reason},
@@ -139,7 +128,6 @@ class PipelineOrchestrator:
         stage_order += 1
         clean_response = result.output["clean_response"]
 
-        # ===== STAGE 6: Evaluator =====
         result = self.evaluator.execute(
             db, request_id, stage_order,
             input_data={"user_prompt": user_prompt, "system_prompt": system_prompt, "clean_response": clean_response},
@@ -163,14 +151,10 @@ class PipelineOrchestrator:
         db.add(evaluation)
         db.commit()
 
-        # ===== STAGE 7: Cost Calculator =====
         result = self.cost_calculator.execute(
             db, request_id, stage_order,
-            input_data={
-                "model_name": model_name,
-                "actual_input_tokens": actual_input_tokens,
-                "actual_output_tokens": actual_output_tokens,
-            },
+            input_data={"model_name": model_name, "actual_input_tokens": actual_input_tokens,
+                        "actual_output_tokens": actual_output_tokens},
         )
         record("cost_calculator", result)
         if not result.success:
@@ -199,11 +183,8 @@ class PipelineOrchestrator:
             "response": clean_response,
             "total_latency_ms": total_latency_ms,
             "stages": stages_summary,
-            "metrics": {
-                "input_tokens": actual_input_tokens,
-                "output_tokens": actual_output_tokens,
-                "cost_usd": total_cost_usd,
-            },
+            "metrics": {"input_tokens": actual_input_tokens, "output_tokens": actual_output_tokens,
+                        "cost_usd": total_cost_usd},
             "evaluation": {
                 "hallucination_score": evaluation_output["hallucination_score"],
                 "faithfulness_score": evaluation_output["faithfulness_score"],
@@ -225,14 +206,26 @@ class PipelineOrchestrator:
 
     def _fail(self, db: Session, request: Request, failed_stage: str, error: str,
                stages_summary: List[Dict]) -> Dict[str, Any]:
+        classification = classify_failure(failed_stage, error)
+
         request.status = "error"
         request.error_message = f"Failed at stage '{failed_stage}': {error}"
+        request.failure_category = classification.category
+        request.failure_evidence = classification.evidence
         db.commit()
-        logger.error(f"Pipeline failed for request {request.id} at '{failed_stage}': {error}")
+
+        logger.error(
+            f"Pipeline failed for request {request.id} at '{failed_stage}': "
+            f"{error} [category={classification.category}]"
+        )
+
         return {
             "trace_id": request.id,
             "status": "error",
             "failed_stage": failed_stage,
             "error": error,
+            "failure_category": classification.category,
+            "failure_evidence": classification.evidence,
+            "suggested_fix": classification.suggested_fix,
             "stages": stages_summary,
         }

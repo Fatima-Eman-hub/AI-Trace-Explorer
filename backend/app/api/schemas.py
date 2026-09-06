@@ -1,18 +1,11 @@
 """
 Pydantic Schemas - define the exact shape of API requests and responses.
-
-FastAPI uses these to:
-1. Validate incoming request bodies (reject bad data automatically)
-2. Generate the /docs Swagger UI documentation
-3. Serialize outgoing responses consistently
 """
 
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 from pydantic import BaseModel, Field
 
-
-# ==================== REQUEST SCHEMAS (what the client sends) ====================
 
 class FewShotExample(BaseModel):
     input: str
@@ -25,19 +18,15 @@ class ModelParameters(BaseModel):
 
 
 class LLMRequestCreate(BaseModel):
-    """Body for POST /api/v1/llm/request"""
     user_prompt: str = Field(..., min_length=1, max_length=10000)
-    model_name: str = Field(..., examples=["claude-sonnet", "llama-3.3-70b"])
+    model_name: str = Field(..., examples=["claude-sonnet", "gpt-oss-120b"])
     system_prompt: Optional[str] = None
     few_shot_examples: Optional[List[FewShotExample]] = None
     model_parameters: Optional[ModelParameters] = None
     tags: Optional[List[str]] = None
 
 
-# ==================== RESPONSE SCHEMAS (what the API sends back) ====================
-
 class StageSummary(BaseModel):
-    """One stage's result, included in the pipeline response."""
     stage_name: str
     status: str
     duration_ms: int
@@ -52,7 +41,6 @@ class Metrics(BaseModel):
 
 
 class EvaluationSummary(BaseModel):
-    """Quality scores produced by the evaluator stage."""
     hallucination_score: float
     faithfulness_score: float
     answer_relevancy: float
@@ -62,7 +50,6 @@ class EvaluationSummary(BaseModel):
 
 
 class LLMRequestResponse(BaseModel):
-    """Response for POST /api/v1/llm/request"""
     trace_id: str
     status: str
     response: Optional[str] = None
@@ -72,10 +59,12 @@ class LLMRequestResponse(BaseModel):
     evaluation: Optional[EvaluationSummary] = None
     failed_stage: Optional[str] = None
     error: Optional[str] = None
+    failure_category: Optional[str] = None
+    failure_evidence: Optional[str] = None
+    suggested_fix: Optional[str] = None
 
 
 class TraceListItem(BaseModel):
-    """One row in the GET /api/v1/traces list."""
     id: str
     timestamp: Optional[datetime] = None
     model_name: str
@@ -85,6 +74,7 @@ class TraceListItem(BaseModel):
     input_tokens: Optional[int] = None
     output_tokens: Optional[int] = None
     cost_usd: Optional[float] = None
+    failure_category: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -98,13 +88,11 @@ class PaginationInfo(BaseModel):
 
 
 class TraceListResponse(BaseModel):
-    """Response for GET /api/v1/traces"""
     traces: List[TraceListItem]
     pagination: PaginationInfo
 
 
 class TraceStageDetail(BaseModel):
-    """One stage row, as stored in the database, for the detail view."""
     stage_name: str
     stage_order: Optional[int] = None
     status: str
@@ -118,7 +106,6 @@ class TraceStageDetail(BaseModel):
 
 
 class TraceDetailResponse(BaseModel):
-    """Response for GET /api/v1/traces/{trace_id}"""
     id: str
     timestamp: Optional[datetime] = None
     model_name: str
@@ -131,6 +118,9 @@ class TraceDetailResponse(BaseModel):
     output_tokens: Optional[int] = None
     cost_usd: Optional[float] = None
     error_message: Optional[str] = None
+    failure_category: Optional[str] = None
+    failure_evidence: Optional[str] = None
+    suggested_fix: Optional[str] = None
     stages: List[TraceStageDetail] = []
     evaluation: Optional[EvaluationSummary] = None
 
@@ -152,7 +142,6 @@ class SupportedModelResponse(BaseModel):
 
 
 class ErrorResponse(BaseModel):
-    """Standard error shape returned on 4xx/5xx responses."""
     error: bool = True
     code: str
     message: str

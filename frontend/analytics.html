@@ -40,9 +40,15 @@ content.innerHTML = `
     <div style="padding:20px;" id="quality-dist"></div>
   </div>
 
-  <div class="card section">
-    <div class="section-head"><h2>✕ Errors by Stage</h2></div>
-    <div id="error-breakdown"></div>
+  <div class="grid-2col" style="grid-template-columns:1fr 1fr;">
+    <div class="card section">
+      <div class="section-head"><h2>✕ Errors by Stage</h2></div>
+      <div id="error-breakdown"></div>
+    </div>
+    <div class="card section">
+      <div class="section-head"><h2>⚑ Errors by Category</h2><span class="hint">Auto-classified root causes</span></div>
+      <div id="category-breakdown"></div>
+    </div>
   </div>
 `;
 
@@ -113,6 +119,13 @@ async function load() {
     if (!stages.length) errEl.innerHTML = emptyState("No errors 🎉", "Every request in this period completed successfully.");
     else errEl.innerHTML = `<table><thead><tr><th>Stage</th><th>Failures</th></tr></thead><tbody>
       ${stages.map(([s,c]) => `<tr><td>${stageLabel(s)}</td><td class="mono">${c}</td></tr>`).join("")}
+    </tbody></table>`;
+
+    const catEl = document.getElementById("category-breakdown");
+    const categories = Object.entries(perf.errors.by_category || {});
+    if (!categories.length) catEl.innerHTML = emptyState("No classified failures", "Categories appear once a request fails and gets auto-classified.");
+    else catEl.innerHTML = `<table><thead><tr><th>Category</th><th>Count</th></tr></thead><tbody>
+      ${categories.sort((a,b) => b[1]-a[1]).map(([cat,c]) => `<tr><td>${escapeHtml(cat.replace(/_/g,' '))}</td><td class="mono">${c}</td></tr>`).join("")}
     </tbody></table>`;
 
   } catch (err) {

@@ -1,3 +1,7 @@
+"""
+Trace Routes - browse, inspect, search, and export past requests.
+"""
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
@@ -10,6 +14,7 @@ import io
 
 from app.database import get_db
 from app.models import Request, Trace, Evaluation
+from app.failure_classifier import SUGGESTED_FIXES
 from app.api.schemas import (
     TraceListResponse, TraceListItem, PaginationInfo,
     TraceDetailResponse, TraceStageDetail, EvaluationSummary,
@@ -24,6 +29,7 @@ def list_traces(
     limit: int = Query(default=20, ge=1, le=100),
     model: Optional[str] = Query(default=None),
     status: Optional[str] = Query(default=None),
+    failure_category: Optional[str] = Query(default=None),
     search: Optional[str] = Query(default=None, description="Search prompt text or model name"),
     db: Session = Depends(get_db),
 ):
@@ -33,6 +39,8 @@ def list_traces(
         query = query.filter(Request.model_name == model)
     if status:
         query = query.filter(Request.status == status)
+    if failure_category:
+        query = query.filter(Request.failure_category == failure_category)
     if search:
         like = f"%{search}%"
         query = query.filter(or_(Request.user_prompt.ilike(like), Request.model_name.ilike(like)))
@@ -47,6 +55,7 @@ def list_traces(
             id=r.id, timestamp=r.timestamp, model_name=r.model_name, status=r.status,
             user_prompt=r.user_prompt, total_latency_ms=r.total_latency_ms,
             input_tokens=r.input_tokens, output_tokens=r.output_tokens, cost_usd=r.cost_usd,
+            failure_category=r.failure_category,
         )
         for r in rows
     ]
@@ -57,6 +66,12 @@ def list_traces(
     )
 
 
+@router.get("/failure-categories")
+def list_failure_categories():
+    """Reference list of all failure categories the classifier knows about, with their hints."""
+    return [{"category": k, "suggested_fix": v} for k, v in SUGGESTED_FIXES.items()]
+
+
 @router.get("/export")
 def export_traces(
     format: str = Query(default="csv", pattern="^(csv|json)$"),
@@ -65,7 +80,6 @@ def export_traces(
     search: Optional[str] = Query(default=None),
     db: Session = Depends(get_db),
 ):
-    """Bulk export of the (filtered) trace list, as CSV or JSON."""
     query = db.query(Request)
     if model:
         query = query.filter(Request.model_name == model)
@@ -81,26 +95,23 @@ def export_traces(
         data = [r.to_full_dict() for r in rows]
         content = json.dumps(data, indent=2, default=str)
         return StreamingResponse(
-            io.BytesIO(content.encode()),
-            media_type="application/json",
+            io.BytesIO(content.encode()), media_type="application/json",
             headers={"Content-Disposition": "attachment; filename=traces_export.json"},
         )
 
-    # CSV
     buffer = io.StringIO()
     writer = csv.writer(buffer)
-    writer.writerow(["id", "timestamp", "model_name", "status", "user_prompt",
+    writer.writerow(["id", "timestamp", "model_name", "status", "failure_category", "user_prompt",
                       "total_latency_ms", "input_tokens", "output_tokens", "cost_usd"])
     for r in rows:
         writer.writerow([
-            r.id, r.timestamp, r.model_name, r.status,
+            r.id, r.timestamp, r.model_name, r.status, r.failure_category or "",
             (r.user_prompt or "").replace("\n", " "),
             r.total_latency_ms, r.input_tokens, r.output_tokens, r.cost_usd,
         ])
     buffer.seek(0)
     return StreamingResponse(
-        io.BytesIO(buffer.getvalue().encode()),
-        media_type="text/csv",
+        io.BytesIO(buffer.getvalue().encode()), media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=traces_export.csv"},
     )
 
@@ -133,13 +144,19 @@ def get_trace(trace_id: str, db: Session = Depends(get_db)):
             needs_review=evaluation_row.needs_review,
         )
 
+    suggested_fix = SUGGESTED_FIXES.get(request_row.failure_category) if request_row.failure_category else None
+
     return TraceDetailResponse(
         id=request_row.id, timestamp=request_row.timestamp, model_name=request_row.model_name,
         status=request_row.status, user_prompt=request_row.user_prompt,
         system_prompt=request_row.system_prompt, full_response=request_row.full_response,
         total_latency_ms=request_row.total_latency_ms, input_tokens=request_row.input_tokens,
         output_tokens=request_row.output_tokens, cost_usd=request_row.cost_usd,
-        error_message=request_row.error_message, stages=stage_details, evaluation=evaluation_summary,
+        error_message=request_row.error_message,
+        failure_category=request_row.failure_category,
+        failure_evidence=request_row.failure_evidence,
+        suggested_fix=suggested_fix,
+        stages=stage_details, evaluation=evaluation_summary,
     )
 
 
@@ -149,7 +166,6 @@ def export_single_trace(
     format: str = Query(default="json", pattern="^(csv|json)$"),
     db: Session = Depends(get_db),
 ):
-    """Export ONE trace's full detail (request + all stages + evaluation)."""
     request_row = db.query(Request).filter(Request.id == trace_id).first()
     if not request_row:
         raise HTTPException(status_code=404, detail=f"Trace '{trace_id}' not found")
@@ -165,8 +181,7 @@ def export_single_trace(
         }
         content = json.dumps(data, indent=2, default=str)
         return StreamingResponse(
-            io.BytesIO(content.encode()),
-            media_type="application/json",
+            io.BytesIO(content.encode()), media_type="application/json",
             headers={"Content-Disposition": f"attachment; filename=trace_{trace_id[:8]}.json"},
         )
 
@@ -177,8 +192,7 @@ def export_single_trace(
         writer.writerow([s.stage_order, s.stage_name, s.status, s.duration_ms, s.error_message or ""])
     buffer.seek(0)
     return StreamingResponse(
-        io.BytesIO(buffer.getvalue().encode()),
-        media_type="text/csv",
+        io.BytesIO(buffer.getvalue().encode()), media_type="text/csv",
         headers={"Content-Disposition": f"attachment; filename=trace_{trace_id[:8]}_stages.csv"},
     )
 

@@ -89,6 +89,7 @@ async function loadTrace() {
   try {
     const t = await apiGet(`/traces/${traceId}`);
     renderSummary(t);
+    renderFailureBanner(t);
     renderPipeline(t);
     renderStageDetails(t);
     renderEvaluation(t.evaluation);
@@ -97,6 +98,23 @@ async function loadTrace() {
     document.getElementById("summary-card").innerHTML = `<div class="empty-state"><h4>Trace not found</h4><p>${escapeHtml(err.message)}</p></div>`;
     showToast(err.message, true);
   }
+}
+
+function renderFailureBanner(t) {
+  const summaryCard = document.getElementById("summary-card");
+  if (t.status !== "error" || !t.failure_category) return;
+  const banner = document.createElement("div");
+  banner.className = "card";
+  banner.style.cssText = "padding:16px 20px;margin-top:12px;border-left:3px solid var(--error);background:var(--error-soft);";
+  banner.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
+      <span class="badge error"><span class="dot"></span>${escapeHtml(t.failure_category.replace(/_/g, ' '))}</span>
+      <span style="font-size:11px;color:var(--ink-400);">Classified automatically from the error message</span>
+    </div>
+    ${t.failure_evidence ? `<div class="mono" style="font-size:11.5px;color:var(--ink-600);margin-bottom:8px;">Evidence: "${escapeHtml(t.failure_evidence)}"</div>` : ""}
+    ${t.suggested_fix ? `<div style="font-size:12.5px;"><b>Suggested fix:</b> ${escapeHtml(t.suggested_fix)}</div>` : ""}
+  `;
+  summaryCard.insertAdjacentElement("afterend", banner);
 }
 
 function renderSummary(t) {

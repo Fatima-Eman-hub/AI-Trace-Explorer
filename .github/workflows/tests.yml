@@ -1,0 +1,40 @@
+name: Backend Tests
+
+# Runs automatically on every push and pull request - this is what
+# "CI" (Continuous Integration) means: tests run without you having
+# to remember to run them manually.
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        working-directory: ./backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests
+        working-directory: ./backend
+        env:
+          # Tests that need real API keys are auto-skipped (pytest.mark.skipif)
+          # when these are blank - no secrets required for CI to pass.
+          ANTHROPIC_API_KEY: ""
+          GROQ_API_KEY: ""
+          GOOGLE_API_KEY: ""
+        run: |
+          pytest -v

@@ -36,13 +36,14 @@ content.innerHTML = `
           </div>
           <div style="flex:1;">
             <label>Max Tokens</label>
-            <input type="number" id="max-tokens" value="500" step="50" min="1" max="4096" />
+            <input type="number" id="max-tokens" value="2048" step="50" min="1" max="4096" />
           </div>
         </div>
         <button type="submit" class="btn btn-trace" style="width:100%;justify-content:center;" id="submit-btn">
           ▶ Run Through Pipeline
         </button>
         <p class="field help" style="text-align:center;">Free tip: choose a <b>Groq</b> model (gpt-oss-120b) to test with zero cost.</p>
+        <p class="field help" style="text-align:center;">Note: Gemini models spend part of Max Tokens on hidden "thinking" before answering - keep this ≥2000 with Gemini or you may get cut-off responses.</p>
       </form>
     </div>
 

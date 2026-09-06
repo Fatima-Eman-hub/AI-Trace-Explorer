@@ -1,19 +1,13 @@
 """
 Analytics Schemas - shapes for the /analytics endpoints.
-
-Kept in a separate file from schemas.py since these are read-only
-reporting shapes, not tied to the core request/trace/evaluation models.
 """
 
 from typing import Dict, List, Optional
 from pydantic import BaseModel
 
 
-# ==================== LATENCY ====================
-
 class LatencyBucket(BaseModel):
-    """One time bucket (e.g. one hour) of latency stats."""
-    bucket: str  # e.g. "2026-08-13 14:00:00"
+    bucket: str
     avg_latency_ms: float
     min_latency_ms: int
     max_latency_ms: int
@@ -32,8 +26,6 @@ class LatencyAnalyticsResponse(BaseModel):
     data: List[LatencyBucket]
     summary: LatencySummary
 
-
-# ==================== COST ====================
 
 class ModelCostBreakdown(BaseModel):
     requests: int
@@ -54,8 +46,6 @@ class CostAnalyticsResponse(BaseModel):
     by_hour: List[CostBucket]
 
 
-# ==================== PERFORMANCE ====================
-
 class ThroughputInfo(BaseModel):
     requests_per_hour: float
     peak_hour_count: int
@@ -65,6 +55,7 @@ class ThroughputInfo(BaseModel):
 class ErrorBreakdown(BaseModel):
     total_errors: int
     by_stage: Dict[str, int]
+    by_category: Dict[str, int] = {}
 
 
 class QualityMetrics(BaseModel):
