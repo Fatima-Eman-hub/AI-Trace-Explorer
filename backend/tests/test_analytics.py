@@ -1,9 +1,12 @@
 """
 Test analytics endpoints.
 
-Rather than calling real LLM APIs, we insert sample Request/Trace/
-Evaluation rows directly into a fresh in-memory test database, then
-verify the analytics endpoints aggregate them correctly.
+Uses an isolated in-memory SQLite database with StaticPool, which is
+essential here: without StaticPool, SQLAlchemy may open a NEW physical
+connection per query, and each new connection to sqlite:///:memory:
+gets its own EMPTY database - causing "no such table" errors that only
+show up when the full test suite runs together (as it does in CI),
+not when this file is run alone.
 """
 
 import pytest
@@ -17,9 +20,11 @@ from main import app
 from app.database import Base, get_db
 from app.models import Request, Trace, Evaluation
 
-TEST_DATABASE_URL = "sqlite:///:memory:"
+# A dedicated engine/pool for THIS file only - StaticPool keeps a single
+# shared connection alive for the life of this engine, so every session
+# created from it sees the same in-memory database.
 engine = create_engine(
-    TEST_DATABASE_URL,
+    "sqlite:///:memory:",
     connect_args={"check_same_thread": False},
     poolclass=StaticPool,
 )
@@ -34,17 +39,16 @@ def override_get_db():
         db.close()
 
 
-app.dependency_overrides[get_db] = override_get_db
-
-
 @pytest.fixture(scope="module", autouse=True)
 def setup_test_db():
+    # Make sure this module's overrides + schema are in place before ANY
+    # test in this file runs, regardless of what other test files did.
+    app.dependency_overrides[get_db] = override_get_db
     Base.metadata.create_all(bind=engine)
 
     db = TestSessionLocal()
     now = datetime.utcnow()
 
-    # Two successful requests on claude-sonnet
     for i in range(2):
         req = Request(
             user_prompt=f"Test prompt {i}",
@@ -60,45 +64,35 @@ def setup_test_db():
         db.commit()
         db.refresh(req)
 
-        db.add(Trace(
-            request_id=req.id, stage_name="llm_call", stage_order=3,
-            status="success", duration_ms=200 + i * 40,
-        ))
+        db.add(Trace(request_id=req.id, stage_name="llm_call", stage_order=3,
+                      status="success", duration_ms=200 + i * 40))
         db.add(Evaluation(
-            request_id=req.id,
-            hallucination_score=0.1, faithfulness_score=0.8, answer_relevancy=0.5,
-            overall_quality_score=0.7, quality_level="good", needs_review=False,
+            request_id=req.id, hallucination_score=0.1, faithfulness_score=0.8,
+            answer_relevancy=0.5, overall_quality_score=0.7,
+            quality_level="good", needs_review=False,
         ))
         db.commit()
 
-    # One successful request on a free groq model
     req2 = Request(
-        user_prompt="Free model test",
-        model_name="llama-3.3-70b",
-        status="success",
-        timestamp=now,
-        total_latency_ms=150,
-        input_tokens=40,
-        output_tokens=20,
-        cost_usd=0.0,
+        user_prompt="Free model test", model_name="gpt-oss-120b", status="success",
+        timestamp=now, total_latency_ms=150, input_tokens=40, output_tokens=20, cost_usd=0.0,
     )
     db.add(req2)
     db.commit()
 
-    # One failed request
     req3 = Request(
-        user_prompt="This one failed",
-        model_name="claude-sonnet",
-        status="error",
-        timestamp=now,
-        error_message="Failed at stage 'llm_call': some API error",
+        user_prompt="This one failed", model_name="claude-sonnet", status="error",
+        timestamp=now, error_message="Failed at stage 'llm_call': some API error",
+        failure_category="provider_error",
     )
     db.add(req3)
     db.commit()
     db.close()
 
     yield
+
     Base.metadata.drop_all(bind=engine)
+    app.dependency_overrides.pop(get_db, None)
 
 
 client = TestClient(app)
@@ -109,7 +103,7 @@ def test_latency_analytics():
     assert response.status_code == 200
     body = response.json()
     assert body["period"] == "24h"
-    assert body["summary"]["total_requests"] == 3  # 2 claude + 1 groq (successful only)
+    assert body["summary"]["total_requests"] == 3
     assert body["summary"]["avg_latency_ms"] > 0
 
 
@@ -118,9 +112,6 @@ def test_cost_analytics():
     assert response.status_code == 200
     body = response.json()
     assert "claude-sonnet" in body["by_model"]
-    # 2 successful claude-sonnet requests + 1 errored one (which still has
-    # cost_usd=0.0 as its default, since the error happened before any
-    # tokens were spent) = 3 total requests attributed to this model.
     assert body["by_model"]["claude-sonnet"]["requests"] == 3
     assert body["total_cost_usd"] > 0
 
@@ -129,10 +120,11 @@ def test_performance_analytics():
     response = client.get("/api/v1/analytics/performance?period=24h")
     assert response.status_code == 200
     body = response.json()
-    assert body["total_requests"] == 4  # 3 success + 1 error
+    assert body["total_requests"] == 4
     assert body["error_rate"] > 0
     assert body["errors"]["total_errors"] == 1
     assert "llm_call" in body["errors"]["by_stage"]
+    assert body["errors"]["by_category"].get("provider_error") == 1
     assert body["quality"]["good_count"] == 2
 
 

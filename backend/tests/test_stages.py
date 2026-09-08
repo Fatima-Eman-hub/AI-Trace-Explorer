@@ -1,10 +1,9 @@
 """
 Test stages - verify individual stages and the full pipeline work
 
-Note: test_llm_call_stage and test_full_pipeline_with_real_api require a
-valid ANTHROPIC_API_KEY or GROQ_API_KEY in .env - they are marked to skip
-automatically if neither key is set, so the rest of the suite still runs
-offline.
+Note: test_full_pipeline_with_real_api requires a valid ANTHROPIC_API_KEY
+or GROQ_API_KEY in .env - it's skipped automatically if neither is set,
+so it's also skipped safely in CI (no secrets configured there).
 """
 
 import pytest
@@ -29,9 +28,7 @@ def test_prompt_builder_with_few_shot():
     stage = PromptBuilderStage()
     output = stage.run({
         "user_prompt": "What is ML?",
-        "few_shot_examples": [
-            {"input": "What is AI?", "output": "AI is..."}
-        ],
+        "few_shot_examples": [{"input": "What is AI?", "output": "AI is..."}],
     })
     assert "What is AI?" in output["formatted_prompt"]
     assert "What is ML?" in output["formatted_prompt"]
@@ -46,10 +43,7 @@ def test_prompt_builder_empty_prompt_fails():
 
 def test_tokenizer_estimates_tokens():
     stage = TokenizerStage()
-    output = stage.run({
-        "formatted_prompt": "What is artificial intelligence?",
-        "system_prompt": "",
-    })
+    output = stage.run({"formatted_prompt": "What is artificial intelligence?", "system_prompt": ""})
     assert output["estimated_input_tokens"] > 0
     assert output["estimated_output_tokens"] > 0
     assert "context_window_used_pct" in output
@@ -57,19 +51,24 @@ def test_tokenizer_estimates_tokens():
 
 def test_llm_gateway_resolves_claude():
     stage = LLMGatewayStage()
-    output = stage.run({
-        "model_name": "claude-sonnet",
-        "model_parameters": {"temperature": 0.5},
-    })
+    output = stage.run({"model_name": "claude-sonnet", "model_parameters": {"temperature": 0.5}})
     assert output["provider"] == "anthropic"
     assert output["resolved_parameters"]["temperature"] == 0.5
     assert output["resolved_parameters"]["max_tokens"] == 1024
 
 
 def test_llm_gateway_resolves_groq():
+    """NOTE: Groq deprecated llama-3.3-70b-versatile on 2026-06-17 -
+    we now use gpt-oss-120b (see llm_gateway.py MODEL_PROVIDER_MAP)."""
     stage = LLMGatewayStage()
-    output = stage.run({"model_name": "llama-3.3-70b"})
+    output = stage.run({"model_name": "gpt-oss-120b"})
     assert output["provider"] == "groq"
+
+
+def test_llm_gateway_resolves_gemini():
+    stage = LLMGatewayStage()
+    output = stage.run({"model_name": "gemini-flash"})
+    assert output["provider"] == "google"
 
 
 def test_llm_gateway_unsupported_model_fails():
@@ -97,23 +96,22 @@ def test_response_parser_empty_response_fails():
 
 def test_cost_calculator():
     stage = CostCalculatorStage()
-    output = stage.run({
-        "model_name": "claude-sonnet",
-        "actual_input_tokens": 1000,
-        "actual_output_tokens": 1000,
-    })
+    output = stage.run({"model_name": "claude-sonnet", "actual_input_tokens": 1000, "actual_output_tokens": 1000})
     assert output["input_cost_usd"] == 0.003
     assert output["output_cost_usd"] == 0.015
     assert output["total_cost_usd"] == 0.018
 
 
 def test_cost_calculator_groq_is_free():
+    """NOTE: uses gpt-oss-120b (Groq's current free model) - see note above."""
     stage = CostCalculatorStage()
-    output = stage.run({
-        "model_name": "llama-3.3-70b",
-        "actual_input_tokens": 1000,
-        "actual_output_tokens": 1000,
-    })
+    output = stage.run({"model_name": "gpt-oss-120b", "actual_input_tokens": 1000, "actual_output_tokens": 1000})
+    assert output["total_cost_usd"] == 0.0
+
+
+def test_cost_calculator_gemini_is_free():
+    stage = CostCalculatorStage()
+    output = stage.run({"model_name": "gemini-flash", "actual_input_tokens": 1000, "actual_output_tokens": 1000})
     assert output["total_cost_usd"] == 0.0
 
 
@@ -122,27 +120,19 @@ def test_cost_calculator_groq_is_free():
     reason="No ANTHROPIC_API_KEY or GROQ_API_KEY set",
 )
 def test_full_pipeline_with_real_api():
-    """
-    Integration test: runs the FULL 7-stage pipeline against a real API
-    (prefers Groq since it's free). Only runs if a key is configured.
-    """
     from app.database import Base, SessionLocal, engine
     from app.pipeline import PipelineOrchestrator
 
     Base.metadata.create_all(bind=engine)
     db = SessionLocal()
 
-    model_name = "llama-3.3-70b" if settings.groq_api_key else "claude-sonnet"
+    model_name = "gpt-oss-120b" if settings.groq_api_key else "claude-sonnet"
 
     orchestrator = PipelineOrchestrator()
-    result = orchestrator.run(
-        db=db,
-        user_prompt="Say hello in exactly 3 words.",
-        model_name=model_name,
-    )
+    result = orchestrator.run(db=db, user_prompt="Say hello in exactly 3 words.", model_name=model_name)
 
     assert result["status"] == "success"
-    assert len(result["stages"]) == 7  # now includes the evaluator stage
+    assert len(result["stages"]) == 7
     assert result["metrics"]["cost_usd"] >= 0
     assert len(result["response"]) > 0
     assert "evaluation" in result
