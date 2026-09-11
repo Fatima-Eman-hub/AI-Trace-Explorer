@@ -40,3 +40,4 @@ coverage.xml
 
 # SQLite
 *.sqlite3
+*.db

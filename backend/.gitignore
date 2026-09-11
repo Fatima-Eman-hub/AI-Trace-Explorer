@@ -34,6 +34,7 @@ coverage.xml
 
 # SQLite
 *.sqlite3
+*.db
 
 # IDEs and editors
 .vscode/
