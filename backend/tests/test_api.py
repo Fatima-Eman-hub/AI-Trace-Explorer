@@ -1,10 +1,17 @@
 """
 Test API endpoints using FastAPI's TestClient.
 
-These tests spin up the app in-memory (no real server/port needed) and
-send fake HTTP requests to it - fast and doesn't touch your real
-ai_trace.db file, since we override the database dependency with a
-fresh in-memory SQLite database for each test session.
+IMPORTANT TEST-ISOLATION NOTE: app.dependency_overrides is a single
+shared dict on the `app` singleton, and pytest imports ALL test modules
+during collection before running ANY tests. That means if this file set
+its override at MODULE level (outside a fixture), it would fire at
+import time - and whichever test file's autouse fixture runs LAST right
+before its own tests would need to re-assert its own override, or an
+earlier file's teardown (e.g. popping the override) could leave this
+file with no override at all, silently falling through to the REAL
+production database (which has no tables created in CI). To avoid this,
+we set (and re-set) the override INSIDE this module's own autouse
+fixture, immediately before this file's tests run - never at import time.
 """
 
 import pytest
@@ -16,10 +23,8 @@ from sqlalchemy.pool import StaticPool
 from main import app
 from app.database import Base, get_db
 
-# In-memory SQLite database just for tests
-TEST_DATABASE_URL = "sqlite:///:memory:"
 engine = create_engine(
-    TEST_DATABASE_URL,
+    "sqlite:///:memory:",
     connect_args={"check_same_thread": False},
     poolclass=StaticPool,
 )
@@ -34,12 +39,11 @@ def override_get_db():
         db.close()
 
 
-app.dependency_overrides[get_db] = override_get_db
-
-
 @pytest.fixture(scope="module", autouse=True)
 def setup_test_db():
-    """Create all tables once for this test module, drop them after."""
+    # Re-assert OUR override right before OUR tests run, regardless of
+    # what any other test file's fixture did before or after us.
+    app.dependency_overrides[get_db] = override_get_db
     Base.metadata.create_all(bind=engine)
     yield
     Base.metadata.drop_all(bind=engine)
@@ -49,23 +53,20 @@ client = TestClient(app)
 
 
 def test_health_check():
-    """Basic health check endpoint works"""
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json()["status"] == "healthy"
 
 
 def test_root_endpoint():
-    """Root endpoint returns API info"""
     response = client.get("/")
     assert response.status_code == 200
     assert response.json()["name"] == "AI Trace Explorer"
 
 
 def test_llm_request_missing_prompt_returns_422():
-    """Empty/missing user_prompt should fail validation before hitting the pipeline"""
     response = client.post("/api/v1/llm/request", json={"model_name": "claude-sonnet"})
-    assert response.status_code == 422  # FastAPI's validation error code
+    assert response.status_code == 422
 
 
 def test_llm_request_unsupported_model():
@@ -81,7 +82,6 @@ def test_llm_request_unsupported_model():
 
 
 def test_list_traces_empty():
-    """With no requests made yet (in this fresh test db), list should be empty"""
     response = client.get("/api/v1/traces")
     assert response.status_code == 200
     body = response.json()
@@ -90,17 +90,11 @@ def test_list_traces_empty():
 
 
 def test_get_trace_not_found():
-    """Requesting a trace_id that doesn't exist should 404"""
     response = client.get("/api/v1/traces/does-not-exist")
     assert response.status_code == 404
 
 
 def test_llm_request_then_fetch_trace():
-    """
-    End-to-end: send a request (that fails at llm_gateway since no real
-    API keys are configured in the test environment), then fetch it back
-    via GET /traces/{id} and confirm the stages were recorded.
-    """
     create_response = client.post("/api/v1/llm/request", json={
         "user_prompt": "What is AI?",
         "model_name": "some-unsupported-model-xyz",
@@ -113,11 +107,10 @@ def test_llm_request_then_fetch_trace():
     body = get_response.json()
     assert body["id"] == trace_id
     assert body["status"] == "error"
-    assert len(body["stages"]) >= 1  # at least prompt_builder + tokenizer ran
+    assert len(body["stages"]) >= 1
 
 
 def test_list_models():
-    """Models endpoint should return the seeded list (once seeded)"""
     response = client.get("/api/v1/models")
     assert response.status_code == 200
     assert isinstance(response.json(), list)
